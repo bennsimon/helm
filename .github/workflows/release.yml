@@ -33,16 +33,10 @@ jobs:
           make build-cross
           make dist checksum VERSION="${{ github.ref_name }}"
 
-      - name: Upload Binaries
-        uses: bacongobbler/azure-blob-storage-upload@50f7d898b7697e864130ea04c303ca38b5751c50 # pin@3.0.0
-        env:
-          AZURE_STORAGE_CONNECTION_STRING: "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}"
-          AZURE_STORAGE_CONTAINER_NAME: "${{ secrets.AZURE_STORAGE_CONTAINER_NAME }}"
+      - name: Release
+        uses: softprops/action-gh-release@v1
         with:
-          source_dir: _dist
-          container_name: ${{ secrets.AZURE_STORAGE_CONTAINER_NAME }}
-          connection_string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
-          extra_args: '--pattern helm-*'
+          files: _dist/helm-*
 
   canary-release:
     runs-on: ubuntu-latest
@@ -64,12 +58,7 @@ jobs:
           make build-cross
           make dist checksum VERSION="canary"
 
-      - name: Upload Binaries
-        uses: bacongobbler/azure-blob-storage-upload@50f7d898b7697e864130ea04c303ca38b5751c50 # pin@3.0.0
+      - name: Release
+        uses: softprops/action-gh-release@v1
         with:
-          source_dir: _dist
-          container_name: ${{ secrets.AZURE_STORAGE_CONTAINER_NAME }}
-          connection_string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
-          extra_args: '--pattern helm-*'
-          # WARNING: this will overwrite existing blobs in your blob storage
-          overwrite: 'true'
+          files: _dist/helm-*
