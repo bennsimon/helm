@@ -18,21 +18,22 @@ package resolver
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/pkg/errors"
 
-	"helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/chart/loader"
-	"helm.sh/helm/v3/pkg/helmpath"
-	"helm.sh/helm/v3/pkg/provenance"
-	"helm.sh/helm/v3/pkg/registry"
-	"helm.sh/helm/v3/pkg/repo"
+	chart "helm.sh/helm/v4/pkg/chart/v2"
+	"helm.sh/helm/v4/pkg/chart/v2/loader"
+	"helm.sh/helm/v4/pkg/helmpath"
+	"helm.sh/helm/v4/pkg/provenance"
+	"helm.sh/helm/v4/pkg/registry"
+	"helm.sh/helm/v4/pkg/repo/v1"
 )
 
 // Resolver resolves dependencies from semantic version ranges to a particular version.
@@ -52,23 +53,21 @@ func New(chartpath, cachepath string, registryClient *registry.Client) *Resolver
 }
 
 // Resolve resolves dependencies and returns a lock file with the resolution.
-func (r *Resolver) Resolve(reqs []*chart.Dependency, repoNames map[string]string) (*chart.Lock, map[string]string, error) {
+func (r *Resolver) Resolve(reqs []*chart.Dependency, repoNames map[string]string) (*chart.Lock, error) {
 
 	// Now we clone the dependencies, locking as we go.
 	locked := make([]*chart.Dependency, len(reqs))
 	missing := []string{}
-	loadedIndexFiles := make(map[string]*repo.IndexFile)
-	urls := make(map[string]string)
 	for i, d := range reqs {
 		constraint, err := semver.NewConstraint(d.Version)
 		if err != nil {
-			return nil, nil, errors.Wrapf(err, "dependency %q has an invalid version/constraint format", d.Name)
+			return nil, fmt.Errorf("dependency %q has an invalid version/constraint format: %w", d.Name, err)
 		}
 
 		if d.Repository == "" {
 			// Local chart subfolder
 			if _, err := GetLocalPath(filepath.Join("charts", d.Name), r.chartpath); err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 
 			locked[i] = &chart.Dependency{
@@ -81,12 +80,12 @@ func (r *Resolver) Resolve(reqs []*chart.Dependency, repoNames map[string]string
 		if strings.HasPrefix(d.Repository, "file://") {
 			chartpath, err := GetLocalPath(d.Repository, r.chartpath)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 
 			ch, err := loader.LoadDir(chartpath)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 
 			v, err := semver.NewVersion(ch.Metadata.Version)
@@ -124,26 +123,14 @@ func (r *Resolver) Resolve(reqs []*chart.Dependency, repoNames map[string]string
 		var ok bool
 		found := true
 		if !registry.IsOCI(d.Repository) {
-			filepath := filepath.Join(r.cachepath, helmpath.CacheIndexFile(repoName))
-			var repoIndex *repo.IndexFile
-
-			// Store previously loaded index files in a map. If repositories share the
-			// same index file there is no need to reload the same file again. This
-			// improves performance.
-			if indexFile, loaded := loadedIndexFiles[filepath]; !loaded {
-				var err error
-				repoIndex, err = repo.LoadIndexFile(filepath)
-				loadedIndexFiles[filepath] = repoIndex
-				if err != nil {
-					return nil, nil, errors.Wrapf(err, "no cached repository for %s found. (try 'helm repo update')", repoName)
-				}
-			} else {
-				repoIndex = indexFile
+			repoIndex, err := repo.LoadIndexFile(filepath.Join(r.cachepath, helmpath.CacheIndexFile(repoName)))
+			if err != nil {
+				return nil, fmt.Errorf("no cached repository for %s found. (try 'helm repo update'): %w", repoName, err)
 			}
 
 			vs, ok = repoIndex.Entries[d.Name]
 			if !ok {
-				return nil, nil, errors.Errorf("%s chart not found in repo %s", d.Name, d.Repository)
+				return nil, fmt.Errorf("%s chart not found in repo %s", d.Name, d.Repository)
 			}
 			found = false
 		} else {
@@ -165,7 +152,7 @@ func (r *Resolver) Resolve(reqs []*chart.Dependency, repoNames map[string]string
 				ref := fmt.Sprintf("%s/%s", strings.TrimPrefix(d.Repository, fmt.Sprintf("%s://", registry.OCIScheme)), d.Name)
 				tags, err := r.registryClient.Tags(ref)
 				if err != nil {
-					return nil, nil, errors.Wrapf(err, "could not retrieve list of tags for repository %s", d.Repository)
+					return nil, fmt.Errorf("could not retrieve list of tags for repository %s: %w", d.Repository, err)
 				}
 
 				vs = make(repo.ChartVersions, len(tags))
@@ -186,8 +173,7 @@ func (r *Resolver) Resolve(reqs []*chart.Dependency, repoNames map[string]string
 			Repository: d.Repository,
 			Version:    version,
 		}
-
-		// The version are already sorted and hence the first one to satisfy the constraint is used
+		// The versions are already sorted and hence the first one to satisfy the constraint is used
 		for _, ver := range vs {
 			v, err := semver.NewVersion(ver.Version)
 			// OCI does not need URLs
@@ -197,9 +183,6 @@ func (r *Resolver) Resolve(reqs []*chart.Dependency, repoNames map[string]string
 			}
 			if constraint.Check(v) {
 				found = true
-				if len(ver.URLs) > 0 {
-					urls[d.Repository+ver.Name+ver.Version] = ver.URLs[0]
-				}
 				locked[i].Version = v.Original()
 				break
 			}
@@ -210,19 +193,19 @@ func (r *Resolver) Resolve(reqs []*chart.Dependency, repoNames map[string]string
 		}
 	}
 	if len(missing) > 0 {
-		return nil, nil, errors.Errorf("can't get a valid version for %d subchart(s): %s. Make sure a matching chart version exists in the repo, or change the version constraint in Chart.yaml", len(missing), strings.Join(missing, ", "))
+		return nil, fmt.Errorf("can't get a valid version for %d subchart(s): %s. Make sure a matching chart version exists in the repo, or change the version constraint in Chart.yaml", len(missing), strings.Join(missing, ", "))
 	}
 
 	digest, err := HashReq(reqs, locked)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	return &chart.Lock{
 		Generated:    time.Now(),
 		Digest:       digest,
 		Dependencies: locked,
-	}, urls, nil
+	}, nil
 }
 
 // HashReq generates a hash of the dependencies.
@@ -270,8 +253,8 @@ func GetLocalPath(repo, chartpath string) (string, error) {
 		depPath = filepath.Join(chartpath, p)
 	}
 
-	if _, err = os.Stat(depPath); os.IsNotExist(err) {
-		return "", errors.Errorf("directory %s not found", depPath)
+	if _, err = os.Stat(depPath); errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("directory %s not found", depPath)
 	} else if err != nil {
 		return "", err
 	}

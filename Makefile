@@ -13,15 +13,15 @@ GOX           = $(GOBIN)/gox
 GOIMPORTS     = $(GOBIN)/goimports
 ARCH          = $(shell go env GOARCH)
 
-ACCEPTANCE_DIR:=../acceptance-testing
+ACCEPTANCE_DIR := ../acceptance-testing
 # To specify the subset of acceptance tests to run. '.' means all tests
-ACCEPTANCE_RUN_TESTS=.
+ACCEPTANCE_RUN_TESTS = .
 
 # go option
 PKG         := ./...
 TAGS        :=
 TESTS       := .
-TESTFLAGS   :=
+TESTFLAGS   := -shuffle=on -count=1
 LDFLAGS     := -w -s
 GOFLAGS     :=
 CGO_ENABLED ?= 0
@@ -44,7 +44,7 @@ BINARY_VERSION ?= ${GIT_TAG}
 
 # Only set Version if building a tag or VERSION is set
 ifneq ($(BINARY_VERSION),)
-	LDFLAGS += -X helm.sh/helm/v3/internal/version.version=${BINARY_VERSION}
+	LDFLAGS += -X helm.sh/helm/v4/internal/version.version=${BINARY_VERSION}
 endif
 
 VERSION_METADATA = unreleased
@@ -53,9 +53,9 @@ ifneq ($(GIT_TAG),)
 	VERSION_METADATA =
 endif
 
-LDFLAGS += -X helm.sh/helm/v3/internal/version.metadata=${VERSION_METADATA}
-LDFLAGS += -X helm.sh/helm/v3/internal/version.gitCommit=${GIT_COMMIT}
-LDFLAGS += -X helm.sh/helm/v3/internal/version.gitTreeState=${GIT_DIRTY}
+LDFLAGS += -X helm.sh/helm/v4/internal/version.metadata=${VERSION_METADATA}
+LDFLAGS += -X helm.sh/helm/v4/internal/version.gitCommit=${GIT_COMMIT}
+LDFLAGS += -X helm.sh/helm/v4/internal/version.gitTreeState=${GIT_DIRTY}
 LDFLAGS += $(EXT_LDFLAGS)
 
 # Define constants based on the client-go version
@@ -63,10 +63,12 @@ K8S_MODULES_VER=$(subst ., ,$(subst v,,$(shell go list -f '{{.Version}}' -m k8s.
 K8S_MODULES_MAJOR_VER=$(shell echo $$(($(firstword $(K8S_MODULES_VER)) + 1)))
 K8S_MODULES_MINOR_VER=$(word 2,$(K8S_MODULES_VER))
 
-LDFLAGS += -X helm.sh/helm/v3/pkg/lint/rules.k8sVersionMajor=$(K8S_MODULES_MAJOR_VER)
-LDFLAGS += -X helm.sh/helm/v3/pkg/lint/rules.k8sVersionMinor=$(K8S_MODULES_MINOR_VER)
-LDFLAGS += -X helm.sh/helm/v3/pkg/chartutil.k8sVersionMajor=$(K8S_MODULES_MAJOR_VER)
-LDFLAGS += -X helm.sh/helm/v3/pkg/chartutil.k8sVersionMinor=$(K8S_MODULES_MINOR_VER)
+LDFLAGS += -X helm.sh/helm/v4/pkg/chart/v2/lint/rules.k8sVersionMajor=$(K8S_MODULES_MAJOR_VER)
+LDFLAGS += -X helm.sh/helm/v4/pkg/chart/v2/lint/rules.k8sVersionMinor=$(K8S_MODULES_MINOR_VER)
+LDFLAGS += -X helm.sh/helm/v4/pkg/internal/v3/lint/rules.k8sVersionMajor=$(K8S_MODULES_MAJOR_VER)
+LDFLAGS += -X helm.sh/helm/v4/pkg/internal/v3/lint/rules.k8sVersionMinor=$(K8S_MODULES_MINOR_VER)
+LDFLAGS += -X helm.sh/helm/v4/pkg/chart/common/util.k8sVersionMajor=$(K8S_MODULES_MAJOR_VER)
+LDFLAGS += -X helm.sh/helm/v4/pkg/chart/common/util.k8sVersionMinor=$(K8S_MODULES_MINOR_VER)
 
 .PHONY: all
 all: build
@@ -75,10 +77,10 @@ all: build
 #  build
 
 .PHONY: build
-build: $(BINDIR)/$(BINNAME)
+build: $(BINDIR)/$(BINNAME) tidy
 
 $(BINDIR)/$(BINNAME): $(SRC)
-	GO111MODULE=on CGO_ENABLED=$(CGO_ENABLED) go build $(GOFLAGS) -trimpath -tags '$(TAGS)' -ldflags '$(LDFLAGS)' -o '$(BINDIR)'/$(BINNAME) ./cmd/helm
+	CGO_ENABLED=$(CGO_ENABLED) go build $(GOFLAGS) -trimpath -tags '$(TAGS)' -ldflags '$(LDFLAGS)' -o '$(BINDIR)'/$(BINNAME) ./cmd/helm
 
 # ------------------------------------------------------------------------------
 #  install
@@ -104,13 +106,24 @@ test: test-unit
 test-unit:
 	@echo
 	@echo "==> Running unit tests <=="
-	GO111MODULE=on go test $(GOFLAGS) -run $(TESTS) $(PKG) $(TESTFLAGS)
+	go test $(GOFLAGS) -run $(TESTS) $(PKG) $(TESTFLAGS)
+	@echo
+	@echo "==> Running unit test(s) with ldflags <=="
+# Test to check the deprecation warnings on Kubernetes templates created by `helm create` against the current Kubernetes
+# version. Note: The version details are set in var LDFLAGS. To avoid the ldflags impact on other unit tests that are
+# based on older versions, this is run separately. When run without the ldflags in the unit test (above) or coverage
+# test, it still passes with a false-positive result as the resources shouldn’t be deprecated in the older Kubernetes
+# version if it only starts failing with the latest.
+	go test $(GOFLAGS) -run ^TestHelmCreateChart_CheckDeprecatedWarnings$$ ./pkg/chart/v2/lint/ $(TESTFLAGS) -ldflags '$(LDFLAGS)'
+	go test $(GOFLAGS) -run ^TestHelmCreateChart_CheckDeprecatedWarnings$$ ./internal/chart/v3/lint/ $(TESTFLAGS) -ldflags '$(LDFLAGS)'
 
+
+# To run the coverage for a specific package use: make test-coverage PKG=./pkg/action
 .PHONY: test-coverage
 test-coverage:
 	@echo
-	@echo "==> Running unit tests with coverage <=="
-	@ ./scripts/coverage.sh
+	@echo "==> Running unit tests with coverage: $(PKG) <=="
+	@ ./scripts/coverage.sh $(PKG)
 
 .PHONY: test-style
 test-style:
@@ -136,18 +149,14 @@ test-acceptance: build build-cross
 test-acceptance-completion: ACCEPTANCE_RUN_TESTS = shells.robot
 test-acceptance-completion: test-acceptance
 
-.PHONY: coverage
-coverage:
-	@scripts/coverage.sh
-
 .PHONY: format
 format: $(GOIMPORTS)
-	GO111MODULE=on go list -f '{{.Dir}}' ./... | xargs $(GOIMPORTS) -w -local helm.sh/helm
+	go list -f '{{.Dir}}' ./... | xargs $(GOIMPORTS) -w -local helm.sh/helm
 
 # Generate golden files used in unit tests
 .PHONY: gen-test-golden
 gen-test-golden:
-gen-test-golden: PKG = ./cmd/helm ./pkg/action
+gen-test-golden: PKG = ./pkg/cmd ./pkg/action
 gen-test-golden: TESTFLAGS = -update
 gen-test-golden: test-unit
 
@@ -159,10 +168,10 @@ gen-test-golden: test-unit
 # without a go.mod file when downloading the following dependencies
 
 $(GOX):
-	(cd /; GO111MODULE=on go install github.com/mitchellh/gox@v1.0.2-0.20220701044238-9f712387e2d2)
+	(cd /; go install github.com/mitchellh/gox@v1.0.2-0.20220701044238-9f712387e2d2)
 
 $(GOIMPORTS):
-	(cd /; GO111MODULE=on go install golang.org/x/tools/cmd/goimports@latest)
+	(cd /; go install golang.org/x/tools/cmd/goimports@latest)
 
 # ------------------------------------------------------------------------------
 #  release
@@ -170,7 +179,7 @@ $(GOIMPORTS):
 .PHONY: build-cross
 build-cross: LDFLAGS += -extldflags "-static"
 build-cross: $(GOX)
-	GOFLAGS="-trimpath" GO111MODULE=on CGO_ENABLED=0 $(GOX) -parallel=3 -output="_dist/{{.OS}}-{{.Arch}}/$(BINNAME)" -osarch='$(TARGETS)' $(GOFLAGS) -tags '$(TAGS)' -ldflags '$(LDFLAGS)' ./cmd/helm
+	GOFLAGS="-trimpath" CGO_ENABLED=0 $(GOX) -parallel=3 -output="_dist/{{.OS}}-{{.Arch}}/$(BINNAME)" -osarch='$(TARGETS)' $(GOFLAGS) -tags '$(TAGS)' -ldflags '$(LDFLAGS)' ./cmd/helm
 
 .PHONY: dist
 dist:
@@ -218,22 +227,23 @@ clean:
 
 .PHONY: release-notes
 release-notes:
-		@if [ ! -d "./_dist" ]; then \
-			echo "please run 'make fetch-dist' first" && \
-			exit 1; \
-		fi
-		@if [ -z "${PREVIOUS_RELEASE}" ]; then \
-			echo "please set PREVIOUS_RELEASE environment variable" \
-			&& exit 1; \
-		fi
-
-		@./scripts/release-notes.sh ${PREVIOUS_RELEASE} ${VERSION}
-
-
+	@if [ ! -d "./_dist" ]; then \
+		echo "please run 'make fetch-dist' first" && \
+		exit 1; \
+	fi
+	@if [ -z "${PREVIOUS_RELEASE}" ]; then \
+		echo "please set PREVIOUS_RELEASE environment variable" && \
+		exit 1; \
+	fi
+	@./scripts/release-notes.sh ${PREVIOUS_RELEASE} ${VERSION}
 
 .PHONY: info
 info:
-	 @echo "Version:           ${VERSION}"
-	 @echo "Git Tag:           ${GIT_TAG}"
-	 @echo "Git Commit:        ${GIT_COMMIT}"
-	 @echo "Git Tree State:    ${GIT_DIRTY}"
+	@echo "Version:           ${VERSION}"
+	@echo "Git Tag:           ${GIT_TAG}"
+	@echo "Git Commit:        ${GIT_COMMIT}"
+	@echo "Git Tree State:    ${GIT_DIRTY}"
+
+.PHONY: tidy
+tidy:
+	go mod tidy

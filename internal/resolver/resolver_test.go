@@ -19,8 +19,8 @@ import (
 	"runtime"
 	"testing"
 
-	"helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/registry"
+	chart "helm.sh/helm/v4/pkg/chart/v2"
+	"helm.sh/helm/v4/pkg/registry"
 )
 
 func TestResolve(t *testing.T) {
@@ -144,7 +144,7 @@ func TestResolve(t *testing.T) {
 	r := New("testdata/chartpath", "testdata/repository", registryClient)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			l, _, err := r.Resolve(tt.req, repoNames)
+			l, err := r.Resolve(tt.req, repoNames)
 			if err != nil {
 				if tt.err {
 					return
